@@ -1,14 +1,14 @@
 
 import os
-import re
-import asyncio
 import logging
+import asyncio
 import requests
 
 from telegram import (
     Update,
     InlineKeyboardButton,
-    InlineKeyboardMarkup
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
 )
 from telegram.ext import (
     Application,
@@ -16,11 +16,11 @@ from telegram.ext import (
     CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
-    filters
+    filters,
 )
 
 # ==========================================
-# CxW SCRIPT CONFIGURATION
+# CONFIGURATION
 # ==========================================
 
 BOT_TOKEN = os.environ["TELE_BOT"]
@@ -31,33 +31,37 @@ API_URL = "https://data.cocoxwho.my.id/api/scripts"
 
 HEADERS = {
     "Content-Type": "application/json",
-    "x-auth-pass": ADMIN_TOKEN
+    "x-auth-pass": ADMIN_TOKEN,
 }
 
 logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+
+MENU_BUTTON = "☰ Open CxW Menu"
+
+REPLY_MENU = ReplyKeyboardMarkup(
+    [[MENU_BUTTON]],
+    resize_keyboard=True,
+    is_persistent=True,
+    input_field_placeholder="Pilih menu CxW Script...",
 )
 
 # ==========================================
-# API HANDLER
+# API
 # ==========================================
 
 def api_request(method, endpoint="", data=None):
-    url = API_URL + endpoint
-
     response = requests.request(
         method,
-        url,
+        API_URL + endpoint,
         headers=HEADERS,
         json=data,
-        timeout=30
+        timeout=30,
     )
 
     response.raise_for_status()
-
-    if response.status_code == 204:
-        return {}
 
     if not response.text:
         return {}
@@ -69,6 +73,9 @@ def get_scripts():
     result = api_request("GET", "?all=true")
 
     if isinstance(result, dict):
+        if result.get("error"):
+            raise RuntimeError(result["error"])
+
         return result.get("scripts", [])
 
     return result
@@ -79,93 +86,109 @@ def add_script(name, tags, url):
         "name": name,
         "tags": tags,
         "url": url,
-        "isPublic": True
+        "isPublic": True,
     })
 
 
-def edit_script(script_id, name, tags, url):
-    data = {
-        "name": name,
-        "tags": tags,
-        "url": url
-    }
-
+def edit_script(script_id, data):
     return api_request(
         "PUT",
-        "/" + script_id,
-        data
+        "/" + str(script_id),
+        data,
     )
 
 
 def delete_script(script_id):
     return api_request(
         "DELETE",
-        "/" + script_id
+        "/" + str(script_id),
     )
 
 
 # ==========================================
-# TAG HANDLER
+# HELPERS
 # ==========================================
 
-def parse_tags(text):
-    tags = []
+def parse_tags(value):
+    result = []
 
-    for tag in text.split(","):
-        tag = tag.strip().lower()
+    for tag in value.split(","):
+        tag = tag.strip().lower().lstrip("#")
 
-        if tag.startswith("#"):
-            tag = tag[1:]
+        if tag and tag not in result:
+            result.append(tag)
 
-        if tag and tag not in tags:
-            tags.append(tag)
+    return result or ["universal"]
+
+
+def get_tags(script):
+    tags = script.get("tags", ["universal"])
+
+    if isinstance(tags, str):
+        return parse_tags(tags)
 
     return tags or ["universal"]
 
 
-def format_tags(tags):
-    if isinstance(tags, str):
-        tags = parse_tags(tags)
-
-    return ", ".join("#" + tag for tag in tags)
+def tag_text(script):
+    return ", ".join("#" + t for t in get_tags(script))
 
 
-# ==========================================
-# KEYBOARDS
-# ==========================================
+def get_script(scripts, number):
+    try:
+        index = int(number) - 1
+
+        if 0 <= index < len(scripts):
+            return scripts[index]
+
+    except (ValueError, TypeError):
+        pass
+
+    return None
+
 
 def main_keyboard():
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
-                "➕ Add Script",
-                callback_data="add"
+                "＋ Add Script",
+                callback_data="add",
             ),
             InlineKeyboardButton(
-                "✏️ Edit Script",
-                callback_data="edit"
-            )
+                "✎ Edit Script",
+                callback_data="edit",
+            ),
         ],
         [
             InlineKeyboardButton(
-                "🗑 Delete Script",
-                callback_data="delete"
+                "⌫ Delete Script",
+                callback_data="delete",
             ),
             InlineKeyboardButton(
-                "🏷 Check All Tag",
-                callback_data="tags"
-            )
+                "⌕ Search",
+                callback_data="search",
+            ),
         ],
         [
             InlineKeyboardButton(
-                "📚 All Script",
-                callback_data="all"
+                "▤ All Scripts",
+                callback_data="all",
             ),
             InlineKeyboardButton(
-                "🔎 Check ID Script",
-                callback_data="ids"
-            )
-        ]
+                "▦ All Tags",
+                callback_data="tags",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "ID Script",
+                callback_data="ids",
+            ),
+            InlineKeyboardButton(
+                "↻ Refresh",
+                callback_data="refresh",
+            ),
+        ],
     ])
 
 
@@ -173,488 +196,606 @@ def back_keyboard():
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
-                "⬅️ Cancel / Main Menu",
-                callback_data="home"
+                "← Main Menu",
+                callback_data="home",
             )
         ]
     ])
 
 
-async def show_menu(update, context):
+def edit_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "Edit Name",
+                callback_data="field_name",
+            ),
+            InlineKeyboardButton(
+                "Edit Tags",
+                callback_data="field_tags",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "Edit URL",
+                callback_data="field_url",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "← Main Menu",
+                callback_data="home",
+            )
+        ],
+    ])
+
+
+async def show_menu(update, context, new_message=False):
     context.user_data["flow"] = None
 
-    message = (
-        "╔════════════════════╗\n"
-        "       ✦ CxW SCRIPT ✦\n"
-        "╚════════════════════╝\n\n"
-        "Welcome to CxW Script Manager.\n\n"
-        "Pilih fitur yang ingin digunakan:"
+    text = (
+        "CxW SCRIPT\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Script Management System\n\n"
+        "Pilih menu yang ingin digunakan."
     )
 
-    if update.callback_query:
+    if update.callback_query and not new_message:
         await update.callback_query.edit_message_text(
-            message,
-            reply_markup=main_keyboard()
+            text,
+            reply_markup=main_keyboard(),
         )
     else:
         await update.effective_message.reply_text(
-            message,
-            reply_markup=main_keyboard()
+            text,
+            reply_markup=REPLY_MENU,
+        )
+
+        await update.effective_message.reply_text(
+            "Menu utama:",
+            reply_markup=main_keyboard(),
         )
 
 
+async def send_chunks(message, content):
+    while content:
+        part = content[:3500]
+
+        if len(content) > 3500:
+            split = part.rfind("\n")
+
+            if split > 0:
+                part = content[:split]
+
+        await message.reply_text(part)
+
+        content = content[len(part):].lstrip()
+
+
+async def safe_scripts():
+    return await asyncio.to_thread(get_scripts)
+
+
 # ==========================================
-# START / AUTHENTICATION
+# START / LOGIN
 # ==========================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["authenticated"] = False
+    if context.user_data.get("authenticated"):
+        await show_menu(update, context, True)
+        return
+
     context.user_data["flow"] = "login"
 
     await update.message.reply_text(
-        "╔════════════════════╗\n"
-        "       ✦ CxW SCRIPT ✦\n"
-        "╚════════════════════╝\n\n"
+        "CxW SCRIPT\n"
+        "━━━━━━━━━━━━━━━━━━\n"
         "Welcome to CxW Script.\n\n"
-        "🔐 Silakan masukkan password untuk mengakses bot:"
+        "Masukkan password untuk melanjutkan:",
+        reply_markup=ReplyKeyboardMarkup(
+            [["Cancel"]],
+            resize_keyboard=True,
+        ),
     )
 
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_data = context.user_data
+async def cancel(update, context):
+    context.user_data["flow"] = None
+    await show_menu(update, context, True)
 
-    if not user_data.get("authenticated"):
-        if user_data.get("flow") != "login":
+
+async def logout(update, context):
+    context.user_data.clear()
+
+    await update.message.reply_text(
+        "Anda telah logout.\n"
+        "Masukkan password kembali melalui /start."
+    )
+
+
+# ==========================================
+# TEXT HANDLER
+# ==========================================
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    data = context.user_data
+
+    if text == "Cancel":
+        if data.get("authenticated"):
+            await show_menu(update, context, True)
+        else:
+            data["flow"] = None
+            await update.message.reply_text(
+                "Login dibatalkan. Gunakan /start untuk mencoba lagi."
+            )
+        return
+
+    if text == MENU_BUTTON:
+        if data.get("authenticated"):
+            await show_menu(update, context, True)
+        else:
+            await update.message.reply_text(
+                "Silakan login melalui /start."
+            )
+        return
+
+    if not data.get("authenticated"):
+        if data.get("flow") != "login":
             return
 
-        password = update.message.text.strip()
-
-        if password == SYSTEM_PASSWORD:
-            user_data["authenticated"] = True
-            user_data["flow"] = None
+        if text == SYSTEM_PASSWORD:
+            data["authenticated"] = True
+            data["flow"] = None
 
             await update.message.reply_text(
-                "✅ Authentication Successful!\n"
-                "Selamat datang di CxW Script."
+                "Login berhasil.\n"
+                "Selamat datang di CxW Script.",
+                reply_markup=REPLY_MENU,
             )
 
-            await show_menu(update, context)
+            await show_menu(update, context, True)
 
         else:
             await update.message.reply_text(
-                "❌ Password salah!\n"
-                "Silakan coba kembali."
+                "Password salah. Silakan coba lagi."
             )
 
         return
 
-    flow = user_data.get("flow")
-    value = update.message.text.strip()
+    flow = data.get("flow")
 
-    # ======================================
     # ADD SCRIPT
-    # ======================================
 
     if flow == "add_name":
-        user_data["new_name"] = value
-        user_data["flow"] = "add_tags"
+        data["add_name"] = text
+        data["flow"] = "add_tags"
 
         await update.message.reply_text(
-            "🏷 Masukkan Tag Script:\n\n"
-            "Contoh:\n"
-            "#sae, #rap, #bf",
-            reply_markup=back_keyboard()
+            "Masukkan tag script.\n\n"
+            "Contoh: #sae, #bf, #rap",
+            reply_markup=back_keyboard(),
         )
 
     elif flow == "add_tags":
-        user_data["new_tags"] = parse_tags(value)
-        user_data["flow"] = "add_url"
+        data["add_tags"] = parse_tags(text)
+        data["flow"] = "add_url"
 
         await update.message.reply_text(
-            "🔗 Masukkan URL Script:",
-            reply_markup=back_keyboard()
+            "Masukkan URL script:",
+            reply_markup=back_keyboard(),
         )
 
     elif flow == "add_url":
-        if not value.startswith(("https://", "http://")):
-            await update.message.reply_text(
-                "❌ URL tidak valid. Masukkan URL HTTP/HTTPS."
-            )
+        if not text.startswith(("https://", "http://")):
+            await update.message.reply_text("URL harus menggunakan HTTP/HTTPS.")
             return
 
         try:
             result = await asyncio.to_thread(
                 add_script,
-                user_data["new_name"],
-                user_data["new_tags"],
-                value
+                data["add_name"],
+                data["add_tags"],
+                text,
             )
 
-            user_data["flow"] = None
+            data["flow"] = None
 
             await update.message.reply_text(
-                "✅ SCRIPT BERHASIL DITAMBAHKAN!\n\n"
-                f"📌 Nama: {user_data['new_name']}\n"
-                f"🏷 Tag: {format_tags(user_data['new_tags'])}\n"
-                f"🆔 ID: {result.get('id', '-')}\n"
-                f"🔗 URL: {value}",
-                reply_markup=main_keyboard()
+                "Script berhasil ditambahkan.\n\n"
+                f"Nama: {data['add_name']}\n"
+                f"Tag: {', '.join('#' + t for t in data['add_tags'])}\n"
+                f"ID: {result.get('id', '-')}\n"
+                f"URL: {text}",
+                reply_markup=REPLY_MENU,
+            )
+
+            await update.message.reply_text(
+                "Menu utama:",
+                reply_markup=main_keyboard(),
             )
 
         except Exception as error:
             await update.message.reply_text(
-                f"❌ Gagal menambahkan script:\n{error}",
-                reply_markup=main_keyboard()
+                f"Gagal menambahkan script:\n{error}"
             )
 
+    # SELECT SCRIPT FOR EDIT
+
+    elif flow == "edit_number":
+        scripts = await safe_scripts()
+        script = get_script(scripts, text)
+
+        if not script:
+            await update.message.reply_text(
+                f"Nomor tidak valid. Pilih 1 sampai {len(scripts)}."
+            )
+            return
+
+        data["edit_script"] = script
+        data["edit_number"] = int(text)
+        data["flow"] = None
+
+        await update.message.reply_text(
+            "EDIT SCRIPT\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"Nomor: {text}\n"
+            f"Nama: {script.get('name', '-')}\n"
+            f"Tag: {tag_text(script)}\n"
+            f"URL: {script.get('url', '-')}\n\n"
+            "Pilih bagian yang ingin diedit:",
+            reply_markup=edit_keyboard(),
+        )
+
+    elif flow == "edit_value":
+        script = data["edit_script"]
+        field = data["edit_field"]
+
+        if field == "name":
+            payload = {"name": text}
+        elif field == "tags":
+            payload = {"tags": parse_tags(text)}
+        else:
+            if not text.startswith(("https://", "http://")):
+                await update.message.reply_text("URL tidak valid.")
+                return
+            payload = {"url": text}
+
+        try:
+            await asyncio.to_thread(
+                api_request,
+                "PUT",
+                "/" + str(script["id"]),
+                payload,
+            )
+
+            data["flow"] = None
+
+            await update.message.reply_text(
+                "Script berhasil diperbarui.\n"
+                f"Nomor: {data['edit_number']}\n"
+                f"Firebase ID: {script['id']}",
+                reply_markup=REPLY_MENU,
+            )
+
+            await update.message.reply_text(
+                "Menu utama:",
+                reply_markup=main_keyboard(),
+            )
+
+        except Exception as error:
+            await update.message.reply_text(f"Gagal edit: {error}")
+
+    # DELETE SCRIPT
+
+    elif flow == "delete_number":
+        scripts = await safe_scripts()
+        script = get_script(scripts, text)
+
+        if not script:
+            await update.message.reply_text(
+                f"Nomor tidak valid. Pilih 1 sampai {len(scripts)}."
+            )
+            return
+
+        data["delete_script"] = script
+        data["delete_number"] = int(text)
+        data["flow"] = None
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "Confirm Delete",
+                    callback_data="confirm_delete",
+                ),
+                InlineKeyboardButton(
+                    "Cancel",
+                    callback_data="home",
+                ),
+            ]
+        ])
+
+        await update.message.reply_text(
+            "KONFIRMASI DELETE\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"Nomor: {text}\n"
+            f"Nama: {script.get('name', '-')}\n"
+            f"ID: {script.get('id', '-')}\n\n"
+            "Apakah kamu yakin ingin menghapus script ini?",
+            reply_markup=keyboard,
+        )
+
+    # SEARCH
+
+    elif flow == "search":
+        scripts = await safe_scripts()
+        query = text.lower()
+
+        matches = []
+
+        for index, script in enumerate(scripts, 1):
+            name = str(script.get("name", "")).lower()
+
+            if query in name or query == str(index):
+                matches.append((index, script))
+
+        data["flow"] = None
+
+        if not matches:
+            await update.message.reply_text(
+                "Tidak ada script yang cocok dengan pencarian tersebut.",
+                reply_markup=main_keyboard(),
+            )
+            return
+
+        output = ["SEARCH RESULTS\n━━━━━━━━━━━━━━━━━━\n"]
+
+        for index, script in matches:
+            output.append(
+                f"#{index} — {script.get('name', '-')}\n"
+                f"Firebase ID: {script.get('id', '-')}\n"
+                f"Tags: {tag_text(script)}\n"
+                f"URL: {script.get('url', '-')}\n"
+            )
+
+        await send_chunks(
+            update.message,
+            "\n".join(output),
+        )
+
+        await update.message.reply_text(
+            "Menu utama:",
+            reply_markup=main_keyboard(),
+        )
+
+
+# ==========================================
+# LISTS
+# ==========================================
+
+async def show_scripts(query, ids_only=False):
+    scripts = await safe_scripts()
+
+    if not scripts:
+        await query.message.reply_text("Belum ada script.")
         return
 
-    # ======================================
-    # EDIT SCRIPT
-    # ======================================
+    lines = []
 
-    elif flow == "edit_id":
-        try:
-            scripts = await asyncio.to_thread(get_scripts)
+    if ids_only:
+        lines.append("SCRIPT ID LIST\n━━━━━━━━━━━━━━━━━━\n")
 
-            script = next(
-                (s for s in scripts if s["id"] == value),
-                None
+        for index, script in enumerate(scripts, 1):
+            lines.append(
+                f"#{index} {script.get('name', '-')}\n"
+                f"ID: {script.get('id', '-')}\n"
+            )
+    else:
+        lines.append("ALL SCRIPTS\n━━━━━━━━━━━━━━━━━━\n")
+
+        for index, script in enumerate(scripts, 1):
+            lines.append(
+                f"#{index} {script.get('name', '-')}\n"
+                f"ID: {script.get('id', '-')}\n"
+                f"Tags: {tag_text(script)}\n"
+                f"URL: {script.get('url', '-')}\n"
             )
 
-            if not script:
-                await update.message.reply_text(
-                    "❌ Script ID tidak ditemukan."
-                )
-                return
+    await send_chunks(
+        query.message,
+        "\n".join(lines),
+    )
 
-            user_data["edit_id"] = value
-            user_data["edit_old"] = script
-            user_data["flow"] = "edit_name"
 
-            await update.message.reply_text(
-                "✏️ EDIT SCRIPT\n\n"
-                f"Nama sekarang: {script.get('name', '')}\n"
-                f"Tag sekarang: {format_tags(script.get('tags', []))}\n"
-                f"URL sekarang: {script.get('url', '')}\n\n"
-                "Masukkan nama baru.\n"
-                "Kirim - jika ingin mempertahankan nama lama.",
-                reply_markup=back_keyboard()
-            )
+async def show_tags(query):
+    scripts = await safe_scripts()
+    counts = {}
 
-        except Exception as error:
-            await update.message.reply_text(f"❌ Error: {error}")
+    for script in scripts:
+        for tag in get_tags(script):
+            counts[tag] = counts.get(tag, 0) + 1
 
-    elif flow == "edit_name":
-        old = user_data["edit_old"]
-        user_data["edit_name"] = (
-            old.get("name", "") if value == "-" else value
+    if not counts:
+        await query.message.reply_text("Belum ada tag.")
+        return
+
+    output = [
+        "ALL TAGS\n━━━━━━━━━━━━━━━━━━\n"
+    ]
+
+    for tag, count in sorted(counts.items()):
+        output.append(f"#{tag} — {count} scripts")
+
+    output.append(f"\nTotal tags: {len(counts)}")
+
+    await send_chunks(query.message, "\n".join(output))
+
+
+# ==========================================
+# CALLBACKS
+# ==========================================
+
+async def button_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+
+    data = context.user_data
+    action = query.data
+
+    if not data.get("authenticated"):
+        await query.message.reply_text(
+            "Silakan login menggunakan /start."
+        )
+        return
+
+    if action == "home":
+        await show_menu(update, context)
+        return
+
+    if action == "refresh":
+        await show_menu(update, context)
+        return
+
+    if action == "add":
+        data["flow"] = "add_name"
+
+        await query.edit_message_text(
+            "ADD SCRIPT\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Masukkan nama script:",
+            reply_markup=back_keyboard(),
         )
 
-        user_data["flow"] = "edit_tags"
+    elif action == "edit":
+        scripts = await safe_scripts()
 
-        await update.message.reply_text(
-            "Masukkan tag baru:\n"
-            "Contoh: #sae, #bf\n\n"
-            "Kirim - untuk mempertahankan tag lama."
+        if not scripts:
+            await query.edit_message_text("Belum ada script untuk diedit.")
+            return
+
+        data["flow"] = "edit_number"
+
+        await query.edit_message_text(
+            "EDIT SCRIPT\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Masukkan nomor urutan script yang ingin diedit.\n\n"
+            "Gunakan All Scripts untuk melihat nomor."
         )
 
-    elif flow == "edit_tags":
-        old = user_data["edit_old"]
+    elif action == "delete":
+        scripts = await safe_scripts()
 
-        user_data["edit_tags"] = (
-            old.get("tags", ["universal"])
-            if value == "-"
-            else parse_tags(value)
+        if not scripts:
+            await query.edit_message_text("Belum ada script untuk dihapus.")
+            return
+
+        data["flow"] = "delete_number"
+
+        await query.edit_message_text(
+            "DELETE SCRIPT\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Masukkan nomor urutan script yang ingin dihapus."
         )
 
-        user_data["flow"] = "edit_url"
+    elif action == "search":
+        data["flow"] = "search"
 
-        await update.message.reply_text(
-            "Masukkan URL baru.\n\n"
-            "Kirim - untuk mempertahankan URL lama."
+        await query.edit_message_text(
+            "SEARCH SCRIPT\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Masukkan nama atau nomor urutan script:",
+            reply_markup=back_keyboard(),
         )
 
-    elif flow == "edit_url":
-        old = user_data["edit_old"]
+    elif action == "all":
+        await show_scripts(query)
 
-        new_url = old.get("url", "") if value == "-" else value
+    elif action == "ids":
+        await show_scripts(query, True)
 
-        if not new_url.startswith(("https://", "http://")):
-            await update.message.reply_text(
-                "❌ URL tidak valid."
-            )
+    elif action == "tags":
+        await show_tags(query)
+
+    elif action.startswith("field_"):
+        script = data.get("edit_script")
+
+        if not script:
+            await query.edit_message_text("Sesi edit tidak ditemukan.")
+            return
+
+        field = action.replace("field_", "")
+
+        data["edit_field"] = field
+        data["flow"] = "edit_value"
+
+        prompts = {
+            "name": "Masukkan nama script yang baru:",
+            "tags": "Masukkan tag baru. Contoh: #sae, #bf:",
+            "url": "Masukkan URL baru:",
+        }
+
+        await query.edit_message_text(
+            prompts[field],
+            reply_markup=back_keyboard(),
+        )
+
+    elif action == "confirm_delete":
+        script = data.get("delete_script")
+
+        if not script:
+            await query.edit_message_text("Data penghapusan tidak ditemukan.")
             return
 
         try:
             await asyncio.to_thread(
-                edit_script,
-                user_data["edit_id"],
-                user_data["edit_name"],
-                user_data["edit_tags"],
-                new_url
+                delete_script,
+                str(script["id"]),
             )
 
-            user_data["flow"] = None
-
-            await update.message.reply_text(
-                "✅ SCRIPT BERHASIL DIPERBARUI!\n\n"
-                f"🆔 ID: {user_data['edit_id']}\n"
-                f"📌 Nama: {user_data['edit_name']}\n"
-                f"🏷 Tag: {format_tags(user_data['edit_tags'])}\n"
-                f"🔗 URL: {new_url}",
-                reply_markup=main_keyboard()
-            )
-
-        except Exception as error:
-            await update.message.reply_text(
-                f"❌ Gagal edit:\n{error}",
-                reply_markup=main_keyboard()
-            )
-
-        return
-
-    # ======================================
-    # DELETE SCRIPT
-    # ======================================
-
-    elif flow == "delete_id":
-        try:
-            scripts = await asyncio.to_thread(get_scripts)
-
-            script = next(
-                (s for s in scripts if s["id"] == value),
-                None
-            )
-
-            if not script:
-                await update.message.reply_text(
-                    "❌ ID script tidak ditemukan."
-                )
-                return
-
-            user_data["delete_id"] = value
-            user_data["delete_name"] = script.get("name", "Unknown")
-            user_data["flow"] = None
-
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "✅ Confirm Delete",
-                        callback_data="confirm_delete"
-                    ),
-                    InlineKeyboardButton(
-                        "❌ Cancel",
-                        callback_data="home"
-                    )
-                ]
-            ])
-
-            await update.message.reply_text(
-                "⚠️ KONFIRMASI DELETE\n\n"
-                f"Nama: {script.get('name')}\n"
-                f"ID: {value}\n\n"
-                "Yakin ingin menghapus script ini?",
-                reply_markup=keyboard
-            )
-
-        except Exception as error:
-            await update.message.reply_text(f"❌ Error: {error}")
-
-# ==========================================
-# LIST DISPLAY
-# ==========================================
-
-async def send_chunks(message, text):
-    chunks = []
-
-    while len(text) > 3500:
-        position = text.rfind("\n", 0, 3500)
-
-        if position < 1:
-            position = 3500
-
-        chunks.append(text[:position])
-        text = text[position:].lstrip()
-
-    if text:
-        chunks.append(text)
-
-    for chunk in chunks:
-        await message.reply_text(chunk)
-
-
-async def display_scripts(update, context, ids_only=False):
-    scripts = await asyncio.to_thread(get_scripts)
-
-    if not scripts:
-        await update.callback_query.message.reply_text(
-            "Belum ada script tersimpan."
-        )
-        return
-
-    if ids_only:
-        lines = [
-            "🆔 CxW SCRIPT - ID LIST\n"
-        ]
-
-        for index, script in enumerate(scripts, 1):
-            lines.append(
-                f"{index}. {script.get('name', 'Unknown')}\n"
-                f"ID: {script.get('id', '-')}\n"
-            )
-
-    else:
-        lines = [
-            "📚 CxW SCRIPT - ALL SCRIPTS\n"
-        ]
-
-        for index, script in enumerate(scripts, 1):
-            lines.append(
-                f"{index}. {script.get('name', 'Unknown')}\n"
-                f"🆔 {script.get('id', '-')}\n"
-                f"🏷 {format_tags(script.get('tags', []))}\n"
-                f"🔗 {script.get('url', '-')}\n"
-            )
-
-    await send_chunks(
-        update.callback_query.message,
-        "\n".join(lines)
-    )
-
-
-# ==========================================
-# BUTTON HANDLER
-# ==========================================
-
-async def button_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    query = update.callback_query
-    await query.answer()
-
-    user_data = context.user_data
-
-    if not user_data.get("authenticated"):
-        await query.edit_message_text(
-            "🔒 Silakan login menggunakan /start."
-        )
-        return
-
-    action = query.data
-
-    if action == "home":
-        await show_menu(update, context)
-
-    elif action == "add":
-        user_data["flow"] = "add_name"
-
-        await query.edit_message_text(
-            "➕ ADD SCRIPT\n\n"
-            "Masukkan nama script:",
-            reply_markup=back_keyboard()
-        )
-
-    elif action == "edit":
-        user_data["flow"] = "edit_id"
-
-        await query.edit_message_text(
-            "✏️ EDIT SCRIPT\n\n"
-            "Masukkan ID script yang ingin diedit:",
-            reply_markup=back_keyboard()
-        )
-
-    elif action == "delete":
-        user_data["flow"] = "delete_id"
-
-        await query.edit_message_text(
-            "🗑 DELETE SCRIPT\n\n"
-            "Masukkan ID script yang ingin dihapus:",
-            reply_markup=back_keyboard()
-        )
-
-    elif action == "confirm_delete":
-        script_id = user_data.get("delete_id")
-
-        if not script_id:
-            await show_menu(update, context)
-            return
-
-        try:
-            await asyncio.to_thread(delete_script, script_id)
-
-            user_data.pop("delete_id", None)
-            user_data["flow"] = None
+            data["flow"] = None
+            data.pop("delete_script", None)
 
             await query.edit_message_text(
-                "✅ SCRIPT BERHASIL DIHAPUS!\n\n"
-                f"ID: {script_id}\n"
-                f"Nama: {user_data.get('delete_name', '-')}"
+                "SCRIPT DELETED\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"Nomor: {data.get('delete_number', '-')}\n"
+                f"Nama: {script.get('name', '-')}\n"
+                f"ID: {script.get('id', '-')}"
             )
 
             await query.message.reply_text(
                 "Menu utama:",
-                reply_markup=main_keyboard()
+                reply_markup=main_keyboard(),
             )
 
         except Exception as error:
             await query.edit_message_text(
-                f"❌ Gagal menghapus script:\n{error}"
-            )
-
-    elif action == "all":
-        await display_scripts(update, context, False)
-
-    elif action == "ids":
-        await display_scripts(update, context, True)
-
-    elif action == "tags":
-        try:
-            scripts = await asyncio.to_thread(get_scripts)
-
-            tags = set()
-
-            for script in scripts:
-                current = script.get("tags", [])
-
-                if isinstance(current, str):
-                    current = parse_tags(current)
-
-                tags.update(current)
-
-            output = "🏷 CxW SCRIPT - ALL TAGS\n\n"
-
-            for tag in sorted(tags):
-                count = sum(
-                    tag in (
-                        parse_tags(s.get("tags", ""))
-                        if isinstance(s.get("tags"), str)
-                        else s.get("tags", [])
-                    )
-                    for s in scripts
-                )
-
-                output += f"#{tag} — {count} scripts\n"
-
-            output += f"\nTotal Tag: {len(tags)}"
-
-            await query.message.reply_text(output)
-
-        except Exception as error:
-            await query.message.reply_text(
-                f"❌ Gagal mengambil tag:\n{error}"
+                f"Gagal menghapus script:\n{error}"
             )
 
 
 # ==========================================
-# APPLICATION
+# ERROR HANDLER
+# ==========================================
+
+async def error_handler(update, context):
+    logging.error(
+        "Bot error: %s",
+        context.error,
+    )
+
+
+# ==========================================
+# MAIN
 # ==========================================
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("menu", show_menu))
+    app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CommandHandler("logout", logout))
 
     app.add_handler(
         CallbackQueryHandler(button_handler)
@@ -663,15 +804,15 @@ def main():
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            handle_text
+            handle_text,
         )
     )
 
-    logging.info("CxW Script Bot started.")
+    app.add_error_handler(error_handler)
 
-    app.run_polling(
-        drop_pending_updates=True
-    )
+    logging.info("CxW Script V2 started.")
+
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
