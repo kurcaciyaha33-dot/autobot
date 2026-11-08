@@ -1,4 +1,5 @@
-name: WhatsApp Scheduled Message Bot
+
+name: CoCo Production - WhatsApp & Telegram
 
 on:
   workflow_dispatch:
@@ -7,22 +8,22 @@ permissions:
   contents: read
 
 concurrency:
-  group: coco-whatsapp-bot
+  group: coco-production-whatsapp
   cancel-in-progress: false
 
 jobs:
-  whatsapp-bot:
+  production:
     name: CoCo Production
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
 
-      # ==========================================
+      # ======================================
       # STEP 1 - INSTALL DEPENDENCY
-      # ==========================================
+      # ======================================
 
-      - name: Step 1 - Checkout Repository
+      - name: Step 1 - Install Dependency
         uses: actions/checkout@v4
 
       - name: Record Start Time
@@ -35,62 +36,96 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Requirements
+      - name: Install Python Packages
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install requests python-telegram-bot
 
-      # ==========================================
-      # STEP 2 - MEMBACA SECRETS
-      # ==========================================
+      # ======================================
+      # STEP 2 - READ SECRETS
+      # ======================================
 
       - name: Step 2 - Membaca Secrets
         env:
           API_FONNTE: ${{ secrets.API_FONNTE }}
           UID_GB: ${{ secrets.UID_GB }}
+          UID_GB2: ${{ secrets.UID_GB2 }}
+          OWNER_NUMBER: ${{ secrets.OWNER_NUMBER }}
           GHP_T: ${{ secrets.GHP_T }}
           REPOS: ${{ secrets.REPOS }}
+          TELE_BOT: ${{ secrets.TELE_BOT }}
+          PASS_SYS: ${{ secrets.PASS_SYS }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
         run: |
-          if [ -z "$API_FONNTE" ]; then
-            echo "API_FONNTE missing"
-            exit 1
-          fi
+          for name in \
+            API_FONNTE \
+            UID_GB \
+            UID_GB2 \
+            OWNER_NUMBER \
+            GHP_T \
+            REPOS \
+            TELE_BOT \
+            PASS_SYS \
+            ADMIN_TOKEN
+          do
+            if [ -z "${!name}" ]; then
+              echo "Missing secret: $name"
+              exit 1
+            fi
+          done
 
-          if [ -z "$UID_GB" ]; then
-            echo "UID_GB missing"
-            exit 1
-          fi
+          echo "All secrets loaded."
 
-          if [ -z "$GHP_T" ]; then
-            echo "GHP_T missing"
-            exit 1
-          fi
+      # ======================================
+      # STEP 3 - RUN BOTH BOTS
+      # ======================================
 
-          if [ -z "$REPOS" ]; then
-            echo "REPOS missing"
-            exit 1
-          fi
-
-          echo "All secrets successfully loaded."
-
-      # ==========================================
-      # STEP 3 - MENJALANKAN BOT.PY
-      # ==========================================
-
-      - name: Step 3 - Menjalankan bot.py
+      - name: Step 3 - Menjalankan bot.py & bott.py
         env:
           API_FONNTE: ${{ secrets.API_FONNTE }}
           UID_GB: ${{ secrets.UID_GB }}
+          UID_GB2: ${{ secrets.UID_GB2 }}
+          OWNER_NUMBER: ${{ secrets.OWNER_NUMBER }}
+          TELE_BOT: ${{ secrets.TELE_BOT }}
+          PASS_SYS: ${{ secrets.PASS_SYS }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
           RUN_START_EPOCH: ${{ steps.start.outputs.start_epoch }}
+        shell: bash
         run: |
-          python -u bot.py
+          set +e
 
-      # ==========================================
+          echo "Starting WhatsApp Scheduler..."
+          python -u bot.py &
+          BOT_PID=$!
+
+          echo "Starting Telegram Script Manager..."
+          python -u bott.py &
+          TELE_PID=$!
+
+          echo "================================"
+          echo "CoCo Production Online"
+          echo "WhatsApp PID: $BOT_PID"
+          echo "Telegram PID: $TELE_PID"
+          echo "================================"
+
+          wait "$BOT_PID"
+          BOT_STATUS=$?
+
+          echo "WhatsApp scheduler finished."
+
+          kill "$TELE_PID" 2>/dev/null || true
+          wait "$TELE_PID" 2>/dev/null || true
+
+          echo "Telegram bot stopped."
+          exit "$BOT_STATUS"
+
+      # ======================================
       # STEP 4 - KEEP ALIVE
-      # Target: 05:58:59 sejak pencatatan start
-      # ==========================================
+      # TARGET 05:58:59
+      # ======================================
 
       - name: Step 4 - Keep Alive
+        if: success()
         env:
           RUN_START_EPOCH: ${{ steps.start.outputs.start_epoch }}
         run: |
@@ -99,11 +134,10 @@ jobs:
           import time
 
           start = int(os.environ["RUN_START_EPOCH"])
+          target = start + 5 * 3600 + 58 * 60 + 59
 
-          target = start + (5 * 3600) + (58 * 60) + 59
-
-          print("Keep Alive activated.")
-          print("Waiting until 05:58:59...")
+          print("STEP 4 - KEEP ALIVE")
+          print("Target: 05:58:59")
 
           while True:
               remaining = target - time.time()
@@ -111,16 +145,17 @@ jobs:
               if remaining <= 0:
                   break
 
-              time.sleep(min(remaining, 10))
+              print(f"Remaining: {int(remaining)} seconds")
+              time.sleep(min(remaining, 30))
 
           print("Keep Alive completed.")
           PY
 
-      # ==========================================
-      # STEP 5 - SELF RESTART RUN.YML
-      # ==========================================
+      # ======================================
+      # STEP 5 - SELF RESTART
+      # ======================================
 
-      - name: Step 5 - Restart Workflow
+      - name: Step 5 - Restart run.yml
         if: success()
         env:
           GHP_T: ${{ secrets.GHP_T }}
@@ -128,22 +163,20 @@ jobs:
         run: |
           python - <<'PY'
           import os
-          import requests
           import sys
           import time
+          import requests
 
           token = os.environ["GHP_T"].strip()
           repo = os.environ["REPOS"].strip()
 
           if "/" not in repo:
-              print("Invalid REPOS format. Use username/repo")
-              sys.exit(1)
+              sys.exit("Invalid REPOS. Use username/repo")
 
           owner, name = repo.split("/", 1)
 
           if not owner or not name or "/" in name:
-              print("Invalid repository information.")
-              sys.exit(1)
+              sys.exit("Invalid repository.")
 
           headers = {
               "Authorization": f"Bearer {token}",
@@ -153,70 +186,56 @@ jobs:
 
           api = "https://api.github.com"
 
-          print("================================")
-          print("       COCO SELF RESTART")
-          print("================================")
-          print(f"Repository: {owner}/{name}")
-
-          # Get default branch
-          repo_url = f"{api}/repos/{owner}/{name}"
+          print("STEP 5 - SELF RESTART")
+          print("Repository:", repo)
 
           try:
               response = requests.get(
-                  repo_url,
+                  f"{api}/repos/{owner}/{name}",
                   headers=headers,
-                  timeout=20
+                  timeout=30
               )
 
               response.raise_for_status()
 
               branch = response.json()["default_branch"]
 
-              print(f"Default branch: {branch}")
-
           except Exception as error:
-              print("Failed to read repository:", error)
-              sys.exit(1)
+              sys.exit(f"Repository error: {error}")
 
-          # Dispatch run.yml
-          workflow_url = (
+          url = (
               f"{api}/repos/{owner}/{name}"
               "/actions/workflows/run.yml/dispatches"
           )
 
-          payload = {
-              "ref": branch
-          }
+          payload = {"ref": branch}
 
           for attempt in range(1, 4):
-
               try:
                   response = requests.post(
-                      workflow_url,
+                      url,
                       headers=headers,
                       json=payload,
-                      timeout=25
+                      timeout=30
                   )
 
                   if response.status_code == 204:
-                      print("================================")
                       print("SELF RESTART SUCCESS")
-                      print("Next workflow has been dispatched.")
-                      print("================================")
+                      print("Next workflow dispatched.")
                       sys.exit(0)
 
                   print(
-                      f"Attempt {attempt} failed:",
+                      "Attempt:",
+                      attempt,
                       response.status_code,
                       response.text
                   )
 
               except Exception as error:
-                  print(f"Attempt {attempt} error:", error)
+                  print("Error:", error)
 
               if attempt < 3:
                   time.sleep(5)
 
-          print("SELF RESTART FAILED.")
-          sys.exit(1)
+          sys.exit("SELF RESTART FAILED.")
           PY
