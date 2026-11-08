@@ -1,349 +1,576 @@
+
 import os
 import time
+import logging
 import requests
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-# ==========================================
-# CONFIG
-# ==========================================
-
-WIB = ZoneInfo("Asia/Jakarta")
+# ==================================================
+# COCO PRODUCTION - WHATSAPP SCHEDULER
+# ==================================================
 
 API_FONNTE = os.getenv("API_FONNTE")
 UID_GB = os.getenv("UID_GB")
+UID_GB2 = os.getenv("UID_GB2")
+OWNER_NUMBER = os.getenv("OWNER_NUMBER")
+
+RUN_START_EPOCH = int(
+    os.getenv("RUN_START_EPOCH", str(int(time.time())))
+)
+
+TIMEZONE = ZoneInfo("Asia/Jakarta")
 
 FONNTE_URL = "https://api.fonnte.com/send"
+
+HEADERS = {
+    "Authorization": API_FONNTE
+}
+
+# Stop 5 jam 58 menit 30 detik setelah workflow dimulai
+BOT_STOP_EPOCH = RUN_START_EPOCH + 5 * 3600 + 58 * 60 + 30
 
 CHECK_INTERVAL = 10
 SEND_TOLERANCE = 180
 
-# Waktu mulai workflow dicatat oleh run.yml
-RUN_START_EPOCH = int(os.getenv("RUN_START_EPOCH", time.time()))
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
 
-# Bot berhenti 30 detik sebelum Step 4 selesai
-BOT_STOP_EPOCH = RUN_START_EPOCH + (5 * 3600) + (58 * 60) + 30
+# Menyimpan event yang sudah dikirim selama proses berjalan
+sent_messages = set()
 
-# ==========================================
-# VALIDASI
-# ==========================================
 
-if not API_FONNTE:
-    raise SystemExit("API_FONNTE belum diatur!")
+# ==================================================
+# VALIDATION
+# ==================================================
 
-if not UID_GB:
-    raise SystemExit("UID_GB belum diatur!")
+required_secrets = {
+    "API_FONNTE": API_FONNTE,
+    "UID_GB": UID_GB,
+    "UID_GB2": UID_GB2,
+    "OWNER_NUMBER": OWNER_NUMBER,
+}
 
-# ==========================================
-# FONNTE SENDER
-# ==========================================
+for key, value in required_secrets.items():
+    if not value:
+        raise SystemExit(f"[ERROR] Secret {key} belum diatur!")
 
-def send_message(message):
+
+# ==================================================
+# FONNTE HANDLER
+# ==================================================
+
+def send_message(target, message):
+
     try:
         response = requests.post(
             FONNTE_URL,
-            headers={
-                "Authorization": API_FONNTE
-            },
+            headers=HEADERS,
             data={
-                "target": UID_GB,
+                "target": target,
                 "message": message
             },
             timeout=30
         )
 
+        response.raise_for_status()
+
         result = response.json()
 
-        if response.ok and result.get("status") is True:
-            print("[SUCCESS] Pesan berhasil dikirim.")
+        if result.get("status") is True:
+            logging.info(
+                "Message sent successfully: %s",
+                target
+            )
             return True
 
-        print("[FAILED]", result)
+        logging.error(
+            "Fonnte rejected message: %s",
+            result
+        )
+
         return False
 
     except Exception as error:
-        print("[ERROR]", str(error))
+        logging.error(
+            "Failed sending message to %s: %s",
+            target,
+            error
+        )
+
         return False
 
-# ==========================================
-# ACTIVATION MESSAGE
-# ==========================================
+
+def send_to_groups(message, targets):
+
+    success = True
+
+    for target in targets:
+        result = send_message(target, message)
+
+        if not result:
+            success = False
+
+    return success
+
+
+# ==================================================
+# ACTIVATION - PRIVATE MESSAGE ONLY
+# ==================================================
 
 def activate_bot():
-    print("[INFO] Mengirim pesan aktivasi...")
 
-    send_message(
+    message = (
         "🟢Bot Activated\n"
         "> CoCo Production"
     )
 
-# ==========================================
-# SHOLAT MESSAGE
-# ==========================================
+    logging.info("Sending private activation message...")
 
-def sholat_message(nama, waktu, sholat):
+    if send_message(OWNER_NUMBER, message):
+        logging.info("Private activation sent.")
+    else:
+        logging.error("Private activation failed.")
+
+
+# ==================================================
+# GROUP CONFIGURATION
+# ==================================================
+
+ALL_GROUPS = [
+    UID_GB
+]
+
+PRAYER_GROUPS = [
+    UID_GB,
+    UID_GB2
+]
+
+
+# ==================================================
+# MESSAGE FORMAT
+# ==================================================
+
+def prayer_message(title, clock, description):
+
     return (
-        f"Jadwal Sholat {nama}\n\n"
-        f"Pukul:\n"
-        f"{waktu} WIB\n\n"
-        f"*Segeralah Berwudhu dan menunaikan Shalat {sholat}*\n"
-        f"*Karena sesiapa yang sholat akan mendapat pahala dan nikmat*"
+        "╭━━━ 🌙 *JADWAL SHOLAT* ━━━╮\n"
+        "\n"
+        f"🕌 *{title}*\n"
+        f"⏰ *{clock} WIB*\n"
+        "\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"{description}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "\n"
+        "Semoga Allah menerima ibadah kita.\n"
+        "\n"
+        "© CoCo Production"
     )
 
-def get_messages(now):
+
+def announcement_message(title, content):
+
+    return (
+        "╭━━━ 📢 *INFORMASI KELAS 7D* ━━━╮\n"
+        "\n"
+        f"📌 *{title}*\n"
+        "\n"
+        f"{content}\n"
+        "\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Mohon diperhatikan dan dilaksanakan.\n"
+        "\n"
+        "© CoCo Production"
+    )
+
+
+# ==================================================
+# PRAYER SCHEDULE
+# ==================================================
+
+def get_prayer_events(now):
 
     weekday = now.weekday()
-    messages = []
 
-    # ======================================
-    # SUBUH - SETIAP HARI
-    # ======================================
+    events = []
 
-    messages.append((
-        "04:00",
-        "Jadwal Sholat Subuh\n\n"
-        "Pukul:\n"
-        "04.00 WIB\n\n"
-        "*Segeralah bangun dan Berwudhu lalu menunaikan Shalat Subuh*\n"
-        "*Karena sesiapa yang sholat akan mendapat pahala dan nikmat*"
+    # Daily prayers
+
+    events.append((
+        "04:16",
+        "Subuh",
+        prayer_message(
+            "SHOLAT SUBUH",
+            "04.16",
+            "Mari kita tunaikan Sholat Subuh tepat waktu.\n"
+            "Awali hari dengan ibadah dan doa."
+        ),
+        PRAYER_GROUPS
     ))
 
-    # ======================================
-    # DUHUR - KECUALI JUMAT
-    # ======================================
+    # Dzuhur: Monday - Thursday, Saturday - Sunday
+    # Friday uses special Friday prayer reminder
 
     if weekday != 4:
-        messages.append((
-            "12:00",
-            sholat_message("Duhur", "12.00", "Duhur")
+
+        events.append((
+            "11:48",
+            "Dzuhur",
+            prayer_message(
+                "SHOLAT DZUHUR",
+                "11.48",
+                "Waktunya menunaikan Sholat Dzuhur.\n"
+                "Jangan lupa untuk melaksanakan sholat."
+            ),
+            PRAYER_GROUPS
         ))
 
-    # ======================================
-    # JUMAT
-    # ======================================
+    events.append((
+        "15:07",
+        "Ashar",
+        prayer_message(
+            "SHOLAT ASHAR",
+            "15.07",
+            "Mari tunaikan Sholat Ashar tepat waktu."
+        ),
+        PRAYER_GROUPS
+    ))
+
+    events.append((
+        "17:57",
+        "Maghrib",
+        prayer_message(
+            "SHOLAT MAGHRIB",
+            "17.57",
+            "Waktunya Sholat Maghrib.\n"
+            "Jangan lupa berdoa dan membaca Al-Qur'an."
+        ),
+        PRAYER_GROUPS
+    ))
+
+    events.append((
+        "19:09",
+        "Isya",
+        prayer_message(
+            "SHOLAT ISYA",
+            "19.09",
+            "Mari tunaikan Sholat Isya.\n"
+            "Semoga ibadah kita mendapatkan pahala."
+        ),
+        PRAYER_GROUPS
+    ))
+
+    # Friday special schedules
 
     if weekday == 4:
 
-        messages.append((
+        events.append((
             "06:30",
-            "Jadwal Sholat Dhuha 7D\n\n"
-            "Pukul:\n"
-            "06.30 WIB\n\n"
-            "*Segeralah berangkat dan menunaikan Shalat Dhuha bersama*\n"
-            "*Karena sesiapa yang sholat akan mendapat pahala dan nikmat*"
+            "Dhuha Jumat",
+            prayer_message(
+                "SHOLAT DHUHA",
+                "06.30",
+                "Jangan lupa melaksanakan Sholat Dhuha.\n"
+                "Semoga menjadi amal kebaikan dan pahala jariyah."
+            ),
+            PRAYER_GROUPS
         ))
 
-        messages.append((
+        events.append((
             "11:30",
-            "Jadwal Sholat Jumat bagi para laki-laki\n\n"
-            "Pukul:\n"
-            "11.30 WIB\n\n"
-            "*Segeralah Mandi dan menunaikan Shalat Jumat*\n"
-            "*Karena sesiapa yang sholat akan mendapat pahala dan nikmat*"
+            "Sholat Jumat",
+            (
+                "╭━━━ 🕌 *PENGINGAT SHOLAT JUMAT* ━━━╮\n"
+                "\n"
+                "🕋 *SHOLAT JUMAT*\n"
+                "⏰ *11.30 WIB*\n"
+                "\n"
+                "Kepada seluruh laki-laki Muslim,\n"
+                "jangan lupa menunaikan Sholat Jumat.\n"
+                "\n"
+                "Persiapkan diri dan berangkatlah ke masjid.\n"
+                "\n"
+                "Semoga ibadah kita diterima Allah SWT.\n"
+                "\n"
+                "© CoCo Production"
+            ),
+            PRAYER_GROUPS
         ))
 
-    # ======================================
-    # ASHAR
-    # ======================================
+    return events
 
-    messages.append((
-        "15:00",
-        sholat_message("Ashar", "15.00", "Ashar")
-    ))
 
-    # ======================================
-    # MAGHRIB
-    # ======================================
+# ==================================================
+# SCHOOL TIMETABLE
+# ==================================================
 
-    messages.append((
-        "18:00",
-        sholat_message("Maghrib", "18.00", "Maghrib")
-    ))
+SCHOOL_SCHEDULE = {
+    0: [
+        "TIK",
+        "Bahasa Lampung",
+        "Bahasa Inggris",
+        "Bahasa Indonesia"
+    ],
 
-    # ======================================
-    # ISYA
-    # ======================================
+    1: [
+        "Matematika",
+        "IPS",
+        "SB",
+        "IPA"
+    ],
 
-    messages.append((
-        "19:00",
-        sholat_message("Isya", "19.00", "Isya")
-    ))
+    2: [
+        "Bahasa Indonesia",
+        "PPKN",
+        "PAI"
+    ],
 
-    # ======================================
-    # SELASA - PIKET UMUM
-    # ======================================
+    3: [
+        "IPS",
+        "IPA",
+        "Bahasa Inggris",
+        "Matematika"
+    ],
+
+    4: [
+        "PJOK",
+        "BK"
+    ]
+}
+
+
+def timetable_message(now):
+
+    days = [
+        "Senin",
+        "Selasa",
+        "Rabu",
+        "Kamis",
+        "Jumat"
+    ]
+
+    subjects = SCHOOL_SCHEDULE[now.weekday()]
+
+    lines = []
+
+    for index, subject in enumerate(subjects, 1):
+        lines.append(
+            f"{index}. {subject}"
+        )
+
+    return (
+        "╭━━━ 📚 *JADWAL PELAJARAN 7D* ━━━╮\n"
+        "\n"
+        f"📅 *Hari: {days[now.weekday()]}*\n"
+        "⏰ *05.00 WIB*\n"
+        "\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "\n"
+        + "\n".join(lines)
+        + "\n\n"
+        "Selamat belajar!\n"
+        "Jangan lupa mempersiapkan perlengkapan sekolah.\n"
+        "\n"
+        "© CoCo Production"
+    )
+
+
+# ==================================================
+# CLASS ANNOUNCEMENTS
+# ==================================================
+
+def get_class_events(now):
+
+    weekday = now.weekday()
+
+    events = []
+
+    # Tuesday - General duty
 
     if weekday == 1:
-        messages.append((
+
+        events.append((
             "06:00",
-            "Diinformasikan bahwasanya hari ini adalah jadwal piket umum Kelas 7D\n\n"
-            "*Segeralah berangkat dan melaksanakan Piket Umum*\n"
-            "*Sesiapa yang melakukan tugas lebih cepat, akan mendapatkan pahal jariyah*"
+            "Piket Umum",
+            announcement_message(
+                "PIKET UMUM KELAS 7D",
+                "Hari ini jadwal Piket Umum.\n"
+                "Seluruh petugas piket harap melaksanakan "
+                "tugasnya dengan baik."
+            )
         ))
 
-    # ======================================
-    # RABU - KAS
-    # ======================================
+    # Wednesday - Class cash
 
     if weekday == 2:
-        messages.append((
+
+        events.append((
             "06:00",
-            "Diinformasikan bahwasanya hari ini adalah jadwal kas Kelas 7D\n\n"
-            "*Biaya sekitar Rp2.000*\n"
-            "*Membawa uang lebih untuk membayarnya pada Bendahara kelas*"
+            "Kas Kelas",
+            announcement_message(
+                "PEMBAYARAN KAS KELAS 7D",
+                "Jangan lupa membayar kas kelas sebesar:\n\n"
+                "💰 *Rp2.000*\n\n"
+                "Bawalah uang tambahan untuk membayar "
+                "kepada bendahara kelas."
+            )
         ))
 
-    # ======================================
-    # KAMIS - PENGECEKAN KUKU
-    # ======================================
+    # Thursday - Nail checking
 
     if weekday == 3:
-        messages.append((
+
+        events.append((
             "06:00",
-            "Diinformasikan bahwasanya hari ini adalah jadwal pengecekan kuku Kelas 7D\n\n"
-            "*Potonglah kuku mu sesuai Sunnah Rasulullah Saw.*\n"
-            "*Jangan panjangkan kuku mu, karena dapat menjadi sarang iblis*\n"
-            "*Sesiapa yang kukunya panjang akan dikenakan denda sebesar Rp2.000 dibayarkan pada Bendahara*"
+            "Pengecekan Kuku",
+            announcement_message(
+                "PENGECEKAN KUKU KELAS 7D",
+                "Hari ini akan dilakukan pengecekan kuku.\n\n"
+                "✂️ Pastikan kuku sudah dipotong dan bersih.\n"
+                "💰 Denda kuku panjang: *Rp2.000*"
+            )
         ))
 
-    # ======================================
-    # JADWAL PELAJARAN
-    # SETIAP HARI JAM 05.00
-    # ======================================
+    return events
 
-    lessons = {
-        0: {
-            "day": "Senin",
-            "subjects": [
-                "TIK",
-                "B.Lampung",
-                "B.Inggris",
-                "B.Indonesia"
-            ]
-        },
-        1: {
-            "day": "Selasa",
-            "subjects": [
-                "MTK",
-                "IPS",
-                "SB",
-                "IPA"
-            ]
-        },
-        2: {
-            "day": "Rabu",
-            "subjects": [
-                "B.Indonesia",
-                "PPKN",
-                "PAI"
-            ]
-        },
-        3: {
-            "day": "Kamis",
-            "subjects": [
-                "IPS",
-                "IPA",
-                "B.Inggris",
-                "MTK"
-            ]
-        },
-        4: {
-            "day": "Jumat",
-            "subjects": [
-                "PJOK",
-                "BK"
-            ]
-        }
-    }
 
-    if weekday in lessons:
+# ==================================================
+# EVENT SCHEDULER
+# ==================================================
 
-        data = lessons[weekday]
+def event_key(now, event_name):
 
-        subject_text = "\n".join(
-            f"• {subject}"
-            for subject in data["subjects"]
+    return (
+        now.strftime("%Y-%m-%d"),
+        event_name
+    )
+
+
+def is_event_time(now, scheduled_time):
+
+    hour, minute = map(
+        int,
+        scheduled_time.split(":")
+    )
+
+    scheduled = now.replace(
+        hour=hour,
+        minute=minute,
+        second=0,
+        microsecond=0
+    )
+
+    difference = (
+        now - scheduled
+    ).total_seconds()
+
+    return 0 <= difference <= SEND_TOLERANCE
+
+
+def process_event(now, event_name, scheduled_time, message, targets):
+
+    key = event_key(now, event_name)
+
+    if key in sent_messages:
+        return
+
+    if not is_event_time(now, scheduled_time):
+        return
+
+    logging.info(
+        "Event triggered: %s",
+        event_name
+    )
+
+    success = send_to_groups(
+        message,
+        targets
+    )
+
+    if success:
+        sent_messages.add(key)
+        logging.info(
+            "Event completed: %s",
+            event_name
         )
 
-        lesson_message = (
-            "Jadwal Pelajaran Kelas 7D\n\n"
-            f"*Hari: {data['day']}*\n"
-            "Mata Pelajaran:\n"
-            f"{subject_text}"
-        )
 
-        messages.append((
-            "05:00",
-            lesson_message
-        ))
+# ==================================================
+# MAIN SCHEDULER
+# ==================================================
 
-    return messages
+def run_scheduler():
 
-# ==========================================
-# SCHEDULER
-# ==========================================
+    logging.info("CoCo Production WhatsApp Scheduler started.")
 
-def scheduler():
-
-    sent_messages = set()
-
-    print("[INFO] Scheduler aktif.")
-    print("[INFO] Timezone: Asia/Jakarta")
+    activate_bot()
 
     while time.time() < BOT_STOP_EPOCH:
 
-        now = datetime.now(WIB)
-        today = now.strftime("%Y-%m-%d")
+        now = datetime.now(TIMEZONE)
 
-        for scheduled_time, message in get_messages(now):
+        # Prayer notifications
 
-            hour, minute = map(
-                int,
-                scheduled_time.split(":")
+        for scheduled_time, name, message, targets in get_prayer_events(now):
+
+            process_event(
+                now,
+                name,
+                scheduled_time,
+                message,
+                targets
             )
 
-            scheduled = now.replace(
-                hour=hour,
-                minute=minute,
-                second=0,
-                microsecond=0
+        # School timetable
+
+        if now.weekday() <= 4:
+
+            process_event(
+                now,
+                "Jadwal Pelajaran",
+                "05:00",
+                timetable_message(now),
+                ALL_GROUPS
             )
 
-            difference = (
-                now - scheduled
-            ).total_seconds()
+        # Class announcements
 
-            message_id = f"{today}_{scheduled_time}"
+        for scheduled_time, name, message in get_class_events(now):
 
-            if (
-                0 <= difference <= SEND_TOLERANCE
-                and message_id not in sent_messages
-            ):
+            process_event(
+                now,
+                name,
+                scheduled_time,
+                message,
+                ALL_GROUPS
+            )
 
-                print(
-                    f"[SENDING] {scheduled_time} WIB"
-                )
+        remaining = BOT_STOP_EPOCH - time.time()
 
-                if send_message(message):
-                    sent_messages.add(message_id)
+        if remaining <= 0:
+            break
 
-        time.sleep(CHECK_INTERVAL)
+        time.sleep(
+            min(CHECK_INTERVAL, remaining)
+        )
 
-    print("[INFO] Waktu bot selesai.")
-    print("[INFO] Melanjutkan ke Step 4 dan Step 5.")
+    logging.info("CoCo Production Scheduler stopped.")
+    logging.info("Ready for workflow restart.")
 
-# ==========================================
-# MAIN
-# ==========================================
+
+# ==================================================
+# ENTRY POINT
+# ==================================================
 
 if __name__ == "__main__":
 
     print("====================================")
-    print("       WHATSAPP MESSAGE BOT")
-    print("          COCO PRODUCTION")
+    print("       COCO PRODUCTION")
+    print("       WHATSAPP SCHEDULER")
     print("====================================")
 
-    activate_bot()
-
-    scheduler()
+    run_scheduler()
