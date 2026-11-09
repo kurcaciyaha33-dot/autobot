@@ -56,6 +56,8 @@ jobs:
           TELE_BOT: ${{ secrets.TELE_BOT }}
           PASS_SYS: ${{ secrets.PASS_SYS }}
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
         run: |
           for name in \
             API_FONNTE \
@@ -67,6 +69,8 @@ jobs:
             TELE_BOT \
             PASS_SYS \
             ADMIN_TOKEN
+            DISCORD_CHANNEL_ID
+            DISCORD_BOT_TOKEN
           do
             if [ -z "${!name}" ]; then
               echo "Missing secret: $name"
@@ -90,6 +94,8 @@ jobs:
           PASS_SYS: ${{ secrets.PASS_SYS }}
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
           RUN_START_EPOCH: ${{ steps.start.outputs.start_epoch }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
         shell: bash
         run: |
           set +e
@@ -102,10 +108,15 @@ jobs:
           python -u bott.py &
           TELE_PID=$!
 
+          echo "Starting Fetch Notifier..."
+          python -u botd.py &
+          DC_PID=$!
+
           echo "================================"
           echo "CoCo Production Online"
           echo "WhatsApp PID: $BOT_PID"
           echo "Telegram PID: $TELE_PID"
+          echo "Discord PID: $DC_PID"
           echo "================================"
 
           wait "$BOT_PID"
