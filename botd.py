@@ -1,328 +1,183 @@
 
 import os
-import json
-import time
+import re
+import asyncio
 import logging
+
+import discord
 import requests
 
-from pathlib import Path
-from requests.exceptions import RequestException
-
 # ==========================================
-# CoCo Discord to WhatsApp Bot
+# CoCo Discord -> WhatsApp
 # Created By: CoCo x Who?
 # ==========================================
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-DISCORD_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID")
+DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
 
 API_FONNTE = os.getenv("API_FONNTE")
 UID_GB2 = os.getenv("UID_GB2")
 
-POLL_INTERVAL = 2
-STATE_FILE = Path("state.json")
-
-DISCORD_API = "https://discord.com/api/v10"
-FONNTE_API = "https://api.fonnte.com/send"
+FONNTE_URL = "https://api.fonnte.com/send"
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
-session = requests.Session()
-
-
 # ==========================================
 # VALIDATION
 # ==========================================
 
-def validate_config():
-    required = {
-        "DISCORD_BOT_TOKEN": DISCORD_BOT_TOKEN,
-        "DISCORD_CHANNEL_ID": DISCORD_CHANNEL_ID,
-        "API_FONNTE": API_FONNTE,
-        "UID_GB2": UID_GB2,
-    }
+required = {
+    "DISCORD_BOT_TOKEN": DISCORD_BOT_TOKEN,
+    "DISCORD_CHANNEL_ID": DISCORD_CHANNEL_ID,
+    "API_FONNTE": API_FONNTE,
+    "UID_GB2": UID_GB2,
+}
 
-    missing = [key for key, value in required.items() if not value]
+missing = [key for key, value in required.items() if not value]
 
-    if missing:
-        raise RuntimeError(
-            "GitHub Secrets belum lengkap: " + ", ".join(missing)
-        )
-
-
-# ==========================================
-# STATE MANAGEMENT
-# ==========================================
-
-def load_state():
-    if not STATE_FILE.exists():
-        return None
-
-    try:
-        with STATE_FILE.open("r", encoding="utf-8") as file:
-            data = json.load(file)
-
-        return data.get("last_message_id")
-
-    except (json.JSONDecodeError, OSError):
-        logging.warning("State file tidak valid.")
-        return None
-
-
-def save_state(message_id):
-    temp_file = STATE_FILE.with_suffix(".tmp")
-
-    with temp_file.open("w", encoding="utf-8") as file:
-        json.dump(
-            {"last_message_id": str(message_id)},
-            file,
-            indent=2
-        )
-
-    temp_file.replace(STATE_FILE)
-
-
-# ==========================================
-# DISCORD
-# ==========================================
-
-def discord_headers():
-    return {
-        "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
-        "Content-Type": "application/json"
-    }
-
-
-def get_discord_messages(after=None, limit=100):
-    url = (
-        f"{DISCORD_API}/channels/"
-        f"{DISCORD_CHANNEL_ID}/messages"
+if missing:
+    raise RuntimeError(
+        "Missing GitHub Secrets: " + ", ".join(missing)
     )
 
-    params = {"limit": limit}
-
-    if after:
-        params["after"] = str(after)
-
-    response = session.get(
-        url,
-        headers=discord_headers(),
-        params=params,
-        timeout=20
-    )
-
-    if response.status_code == 429:
-        retry_after = float(
-            response.headers.get("Retry-After", 2)
-        )
-        logging.warning(
-            "Discord rate limit. Menunggu %.2f detik.",
-            retry_after
-        )
-        time.sleep(retry_after)
-        return []
-
-    response.raise_for_status()
-
-    messages = response.json()
-
-    # Discord API returns newest-first.
-    messages.sort(key=lambda msg: int(msg["id"]))
-
-    return messages
-
-
-def get_latest_message_id():
-    messages = get_discord_messages(limit=1)
-
-    if messages:
-        return messages[-1]["id"]
-
-    return None
-
-
 # ==========================================
-# MESSAGE FORMATTER
+# DISCORD CLIENT
 # ==========================================
 
-def format_discord_message(message):
-    content = (message.get("content") or "").strip()
+intents = discord.Intents.default()
+intents.message_content = True
 
+client = discord.Client(intents=intents)
+
+processed_messages = set()
+
+# ==========================================
+# CLEAN MESSAGE
+# ==========================================
+
+def clean_message(message):
     parts = []
 
-    if content:
-        parts.append(content)
+    # Normal Discord message
+    if message.content:
+        parts.append(message.content)
 
-    # Include embed information if available.
-    for embed in message.get("embeds", []):
-        title = embed.get("title")
-        description = embed.get("description")
+    # Embed messages from Lua webhook
+    for embed in message.embeds:
+        if embed.title:
+            parts.append(embed.title)
 
-        if title:
-            parts.append(title)
+        if embed.description:
+            parts.append(embed.description)
 
-        if description:
-            parts.append(description)
+        for field in embed.fields:
+            parts.append(f"{field.name}\n{field.value}")
 
-    # Include attachment links.
-    for attachment in message.get("attachments", []):
-        url = attachment.get("url")
+    # Attachments
+    for attachment in message.attachments:
+        parts.append(attachment.url)
 
-        if url:
-            parts.append(url)
+    text = "\n".join(parts).strip()
 
-    if not parts:
-        return None
+    # Remove Discord mention syntax
+    text = re.sub(r"<@!?[0-9]+>", "", text)
+    text = re.sub(r"<@&[0-9]+>", "", text)
+    text = re.sub(r"<#[0-9]+>", "", text)
 
-    return "\n".join(parts)
+    # Remove empty lines caused by removed mentions
+    text = re.sub(r"\n[ \t]*\n[ \t]*\n+", "\n\n", text)
+
+    return text.strip()
 
 
 # ==========================================
-# FONNTE
+# SEND TO FONNTE
 # ==========================================
 
 def send_whatsapp(message):
-    headers = {
-        "Authorization": API_FONNTE
-    }
-
-    payload = {
-        "target": UID_GB2,
-        "message": message
-    }
-
-    response = session.post(
-        FONNTE_API,
-        headers=headers,
-        data=payload,
+    response = requests.post(
+        FONNTE_URL,
+        headers={
+            "Authorization": API_FONNTE
+        },
+        data={
+            "target": UID_GB2,
+            "message": message
+        },
         timeout=30
     )
 
     response.raise_for_status()
 
-    try:
-        result = response.json()
-    except ValueError:
-        raise RuntimeError("Respons Fonnte bukan JSON.")
+    result = response.json()
 
     if result.get("status") is not True:
-        raise RuntimeError(
-            f"Fonnte gagal mengirim: {result}"
-        )
+        raise RuntimeError(f"Fonnte error: {result}")
 
-    return True
+    return result
 
 
 # ==========================================
-# MESSAGE PROCESSOR
+# DISCORD EVENTS
 # ==========================================
 
-def process_message(message):
-    message_id = message["id"]
+@client.event
+async def on_ready():
+    logging.info("CoCo Bot connected.")
+    logging.info("Bot: %s", client.user)
+    logging.info("Channel ID: %s", DISCORD_CHANNEL_ID)
+    logging.info("Waiting for new Discord messages...")
 
-    text = format_discord_message(message)
+
+@client.event
+async def on_message(message):
+    # Only read the configured channel
+    if message.channel.id != DISCORD_CHANNEL_ID:
+        return
+
+    # Ignore duplicate events
+    if message.id in processed_messages:
+        return
+
+    processed_messages.add(message.id)
+
+    # Keep the cache limited
+    if len(processed_messages) > 5000:
+        processed_messages.clear()
+        processed_messages.add(message.id)
+
+    # Do not require a bot mention.
+    # Messages from webhooks are also accepted.
+    text = clean_message(message)
 
     if not text:
+        logging.info("Empty message skipped: %s", message.id)
+        return
+
+    try:
+        await asyncio.to_thread(send_whatsapp, text)
+
         logging.info(
-            "Pesan %s kosong, dilewati.",
-            message_id
+            "Forwarded message %s to WhatsApp.",
+            message.id
         )
-        return True
 
-    author = message.get("author", {})
-    username = author.get("global_name") or author.get("username", "Unknown")
-
-    whatsapp_message = (
-        "🥚 CoCo Notifier V2\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"{text}\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"Discord: {username}"
-    )
-
-    send_whatsapp(whatsapp_message)
-
-    logging.info(
-        "Pesan Discord %s berhasil diteruskan ke WhatsApp.",
-        message_id
-    )
-
-    return True
+    except Exception as error:
+        logging.error(
+            "Failed forwarding message %s: %s",
+            message.id,
+            error
+        )
 
 
 # ==========================================
-# MAIN LOOP
+# START
 # ==========================================
-
-def main():
-    validate_config()
-
-    logging.info("CoCo Discord to WhatsApp Bot started.")
-    logging.info("Polling interval: %s seconds", POLL_INTERVAL)
-
-    last_message_id = load_state()
-
-    # First run: set a baseline so old messages
-    # are not forwarded to WhatsApp.
-    if not last_message_id:
-        latest_id = get_latest_message_id()
-
-        if latest_id:
-            save_state(latest_id)
-            last_message_id = latest_id
-
-            logging.info(
-                "Baseline saved. Menunggu pesan baru: %s",
-                latest_id
-            )
-        else:
-            logging.info("Channel masih kosong.")
-
-    while True:
-        try:
-            messages = get_discord_messages(
-                after=last_message_id,
-                limit=100
-            )
-
-            for message in messages:
-                message_id = message["id"]
-
-                try:
-                    process_message(message)
-
-                    # Save only after successful forwarding.
-                    last_message_id = message_id
-                    save_state(last_message_id)
-
-                except Exception as error:
-                    logging.error(
-                        "Gagal meneruskan pesan %s: %s",
-                        message_id,
-                        error
-                    )
-
-                    # Stop here so the failed message
-                    # can be retried on the next poll.
-                    break
-
-            time.sleep(POLL_INTERVAL)
-
-        except KeyboardInterrupt:
-            logging.info("Bot dihentikan.")
-            break
-
-        except RequestException as error:
-            logging.error("Network/API error: %s", error)
-            time.sleep(POLL_INTERVAL)
-
-        except Exception:
-            logging.exception("Terjadi kesalahan.")
-            time.sleep(POLL_INTERVAL)
-
 
 if __name__ == "__main__":
-    main()
+    logging.info("Starting CoCo Discord to WhatsApp...")
+
+    client.run(DISCORD_BOT_TOKEN)
