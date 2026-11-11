@@ -39,12 +39,10 @@ jobs:
       - name: Install Python Packages
         run: |
           python -m pip install --upgrade pip
-          pip install requests discord.py python-telegram-bot
-
-          echo "All dependencies installed."
+          pip install requests python-telegram-bot
 
       # ==========================================
-      # STEP 2 - READ SECRETS
+      # STEP 2 - VALIDATE SECRETS
       # ==========================================
 
       - name: Step 2 - Membaca Secrets
@@ -86,81 +84,60 @@ jobs:
             fi
           done
 
-          echo "All secrets successfully loaded."
+          echo "All secrets loaded."
 
       # ==========================================
-      # STEP 3 - RUN THREE BOTS
+      # STEP 3 - RUN bot.py
       # ==========================================
 
-      - name: Step 3 - Menjalankan 3 Bot
+      - name: Step 3 - Run WhatsApp Bot
         env:
-          # WhatsApp
           API_FONNTE: ${{ secrets.API_FONNTE }}
           UID_GB: ${{ secrets.UID_GB }}
           UID_GB2: ${{ secrets.UID_GB2 }}
           OWNER_NUMBER: ${{ secrets.OWNER_NUMBER }}
+          RUN_START_EPOCH: ${{ steps.start.outputs.start_epoch }}
 
-          # Telegram
+        run: |
+          echo "Starting bot.py..."
+          python -u bot.py
+
+          echo "bot.py completed."
+
+      # ==========================================
+      # STEP 4 - RUN bott.py
+      # ==========================================
+
+      - name: Step 4 - Run Telegram Bot
+        env:
           TELE_BOT: ${{ secrets.TELE_BOT }}
           PASS_SYS: ${{ secrets.PASS_SYS }}
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
 
-          # Discord
+        run: |
+          echo "Starting bott.py..."
+          python -u bott.py
+
+      # ==========================================
+      # STEP 5 - RUN botd.py
+      # ==========================================
+
+      - name: Step 5 - Run Discord Bot
+        env:
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          API_FONNTE: ${{ secrets.API_FONNTE }}
+          UID_GB2: ${{ secrets.UID_GB2 }}
 
-          RUN_START_EPOCH: ${{ steps.start.outputs.start_epoch }}
-
-        shell: bash
         run: |
-          set -e
-
-          echo "===================================="
-          echo "       COCO PRODUCTION"
-          echo "===================================="
-
-          # Start Telegram
-          echo "Starting Telegram Bot..."
-
-          nohup python -u bott.py > bott.log 2>&1 &
-          echo $! > bott.pid
-
-          # Start Discord
-          echo "Starting Discord Bot..."
-
-          nohup python -u botd.py > botd.log 2>&1 &
-          echo $! > botd.pid
-
-          # Give background processes time to start
-          sleep 5
-
-          # Check Telegram
-          if ! kill -0 "$(cat bott.pid)" 2>/dev/null; then
-            echo "Telegram startup failed."
-            cat bott.log
-            exit 1
-          fi
-
-          # Check Discord
-          if ! kill -0 "$(cat botd.pid)" 2>/dev/null; then
-            echo "Discord startup failed."
-            cat botd.log
-            exit 1
-          fi
-
-          echo "Telegram Bot: RUNNING"
-          echo "Discord Bot: RUNNING"
-
-          echo "Starting WhatsApp Scheduler..."
-
-          # WhatsApp runs in foreground
-          python -u bot.py
+          echo "Starting botd.py..."
+          python -u botd.py
 
       # ==========================================
-      # STEP 4 - KEEP ALIVE
+      # STEP 6 - KEEP ALIVE
       # ==========================================
 
-      - name: Step 4 - Keep Alive
+      - name: Step 6 - Keep Alive
         if: success()
         env:
           RUN_START_EPOCH: ${{ steps.start.outputs.start_epoch }}
@@ -172,13 +149,9 @@ jobs:
           from datetime import timedelta
 
           start = int(os.environ["RUN_START_EPOCH"])
-
           target = start + 5 * 3600 + 58 * 60 + 59
 
-          print("====================================")
-          print("STEP 4 - KEEP ALIVE")
-          print("Target: 05:58:59 from workflow start")
-          print("====================================")
+          print("KEEP ALIVE - Target 05:58:59")
 
           while True:
               remaining = target - time.time()
@@ -197,30 +170,10 @@ jobs:
           PY
 
       # ==========================================
-      # STEP 5 - STOP ALL BACKGROUND BOTS
+      # STEP 7 - SELF RESTART
       # ==========================================
 
-      - name: Step 5 - Stop Background Bots
-        if: always()
-        run: |
-          for file in bott.pid botd.pid; do
-            if [ -f "$file" ]; then
-              PID=$(cat "$file")
-
-              if kill -0 "$PID" 2>/dev/null; then
-                kill "$PID" || true
-                echo "Stopped process: $PID"
-              fi
-            fi
-          done
-
-          echo "Background bot shutdown completed."
-
-      # ==========================================
-      # STEP 6 - SELF RESTART
-      # ==========================================
-
-      - name: Step 6 - Restart run.yml
+      - name: Step 7 - Restart run.yml
         if: success()
         env:
           GHP_T: ${{ secrets.GHP_T }}
@@ -252,37 +205,24 @@ jobs:
 
           api = "https://api.github.com"
 
-          print("====================================")
-          print("STEP 6 - COCO SELF RESTART")
-          print("====================================")
+          print("Getting repository information...")
 
-          # Get default branch
-          try:
-              response = requests.get(
-                  f"{api}/repos/{owner}/{name}",
-                  headers=headers,
-                  timeout=30
-              )
+          response = requests.get(
+              f"{api}/repos/{owner}/{name}",
+              headers=headers,
+              timeout=30
+          )
 
-              response.raise_for_status()
+          response.raise_for_status()
 
-              branch = response.json()["default_branch"]
+          branch = response.json()["default_branch"]
 
-              print("Repository:", repo)
-              print("Branch:", branch)
-
-          except Exception as error:
-              sys.exit(f"Repository error: {error}")
-
-          # Dispatch workflow
           url = (
               f"{api}/repos/{owner}/{name}"
               "/actions/workflows/run.yml/dispatches"
           )
 
-          payload = {
-              "ref": branch
-          }
+          payload = {"ref": branch}
 
           for attempt in range(1, 4):
               try:
@@ -294,10 +234,7 @@ jobs:
                   )
 
                   if response.status_code == 204:
-                      print("====================================")
                       print("SELF RESTART SUCCESS")
-                      print("Next workflow dispatched.")
-                      print("====================================")
                       sys.exit(0)
 
                   print(
@@ -307,7 +244,7 @@ jobs:
                   )
 
               except Exception as error:
-                  print(f"Attempt {attempt} error:", error)
+                  print("Error:", error)
 
               if attempt < 3:
                   time.sleep(5)
