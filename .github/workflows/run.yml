@@ -1,5 +1,5 @@
 
-name: CoCo Production - Multi Bot System
+name: CoCo Production - WhatsApp & Telegram
 
 on:
   workflow_dispatch:
@@ -19,9 +19,9 @@ jobs:
 
     steps:
 
-      # ==========================================
-      # STEP 1 - INSTALL DEPENDENCIES
-      # ==========================================
+      # ======================================
+      # STEP 1 - INSTALL DEPENDENCY
+      # ======================================
 
       - name: Step 1 - Install Dependency
         uses: actions/checkout@v4
@@ -41,9 +41,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests python-telegram-bot
 
-      # ==========================================
-      # STEP 2 - VALIDATE SECRETS
-      # ==========================================
+      # ======================================
+      # STEP 2 - READ SECRETS
+      # ======================================
 
       - name: Step 2 - Membaca Secrets
         env:
@@ -51,107 +51,93 @@ jobs:
           UID_GB: ${{ secrets.UID_GB }}
           UID_GB2: ${{ secrets.UID_GB2 }}
           OWNER_NUMBER: ${{ secrets.OWNER_NUMBER }}
-
+          GHP_T: ${{ secrets.GHP_T }}
+          REPOS: ${{ secrets.REPOS }}
           TELE_BOT: ${{ secrets.TELE_BOT }}
           PASS_SYS: ${{ secrets.PASS_SYS }}
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
-
-          GHP_T: ${{ secrets.GHP_T }}
-          REPOS: ${{ secrets.REPOS }}
-
-          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
-          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-
         run: |
-          set -e
-
           for name in \
             API_FONNTE \
             UID_GB \
             UID_GB2 \
             OWNER_NUMBER \
-            TELE_BOT \
-            PASS_SYS \
-            ADMIN_TOKEN \
             GHP_T \
             REPOS \
-            DISCORD_CHANNEL_ID \
-            DISCORD_BOT_TOKEN
+            TELE_BOT \
+            PASS_SYS \
+            ADMIN_TOKEN
           do
             if [ -z "${!name}" ]; then
-              echo "ERROR: Missing secret: $name"
+              echo "Missing secret: $name"
               exit 1
             fi
           done
 
           echo "All secrets loaded."
 
-      # ==========================================
-      # STEP 3 - RUN bot.py
-      # ==========================================
+      # ======================================
+      # STEP 3 - RUN BOTH BOTS
+      # ======================================
 
-      - name: Step 3 - Run WhatsApp Bot
+      - name: Step 3 - Menjalankan bot.py & bott.py
         env:
           API_FONNTE: ${{ secrets.API_FONNTE }}
           UID_GB: ${{ secrets.UID_GB }}
           UID_GB2: ${{ secrets.UID_GB2 }}
           OWNER_NUMBER: ${{ secrets.OWNER_NUMBER }}
-          RUN_START_EPOCH: ${{ steps.start.outputs.start_epoch }}
-
-        run: |
-          echo "Starting bot.py..."
-          python -u bot.py
-
-          echo "bot.py completed."
-
-      # ==========================================
-      # STEP 4 - RUN bott.py
-      # ==========================================
-
-      - name: Step 4 - Run Telegram Bot
-        env:
           TELE_BOT: ${{ secrets.TELE_BOT }}
           PASS_SYS: ${{ secrets.PASS_SYS }}
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
-
+          RUN_START_EPOCH: ${{ steps.start.outputs.start_epoch }}
+        shell: bash
         run: |
-          echo "Starting bott.py..."
-          python -u bott.py
+          set +e
 
-      # ==========================================
-      # STEP 5 - RUN botd.py
-      # ==========================================
+          echo "Starting WhatsApp Scheduler..."
+          python -u bot.py &
+          BOT_PID=$!
 
-      - name: Step 5 - Run Discord Bot
-        env:
-          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
-          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-          API_FONNTE: ${{ secrets.API_FONNTE }}
-          UID_GB2: ${{ secrets.UID_GB2 }}
+          echo "Starting Telegram Script Manager..."
+          python -u bott.py &
+          TELE_PID=$!
 
-        run: |
-          echo "Starting botd.py..."
-          python -u botd.py
+          echo "================================"
+          echo "CoCo Production Online"
+          echo "WhatsApp PID: $BOT_PID"
+          echo "Telegram PID: $TELE_PID"
+          echo "================================"
 
-      # ==========================================
-      # STEP 6 - KEEP ALIVE
-      # ==========================================
+          wait "$BOT_PID"
+          BOT_STATUS=$?
 
-      - name: Step 6 - Keep Alive
+          echo "WhatsApp scheduler finished."
+
+          kill "$TELE_PID" 2>/dev/null || true
+          wait "$TELE_PID" 2>/dev/null || true
+
+          echo "Telegram bot stopped."
+          exit "$BOT_STATUS"
+
+      # ======================================
+      # STEP 4 - KEEP ALIVE
+      # TARGET 05:58:59
+      # ======================================
+
+      - name: Step 4 - Keep Alive
         if: success()
         env:
           RUN_START_EPOCH: ${{ steps.start.outputs.start_epoch }}
-
         run: |
           python - <<'PY'
           import os
           import time
-          from datetime import timedelta
 
           start = int(os.environ["RUN_START_EPOCH"])
           target = start + 5 * 3600 + 58 * 60 + 59
 
-          print("KEEP ALIVE - Target 05:58:59")
+          print("STEP 4 - KEEP ALIVE")
+          print("Target: 05:58:59")
 
           while True:
               remaining = target - time.time()
@@ -159,26 +145,21 @@ jobs:
               if remaining <= 0:
                   break
 
-              print(
-                  "Remaining:",
-                  str(timedelta(seconds=int(remaining)))
-              )
-
+              print(f"Remaining: {int(remaining)} seconds")
               time.sleep(min(remaining, 30))
 
           print("Keep Alive completed.")
           PY
 
-      # ==========================================
-      # STEP 7 - SELF RESTART
-      # ==========================================
+      # ======================================
+      # STEP 5 - SELF RESTART
+      # ======================================
 
-      - name: Step 7 - Restart run.yml
+      - name: Step 5 - Restart run.yml
         if: success()
         env:
           GHP_T: ${{ secrets.GHP_T }}
           REPOS: ${{ secrets.REPOS }}
-
         run: |
           python - <<'PY'
           import os
@@ -190,12 +171,12 @@ jobs:
           repo = os.environ["REPOS"].strip()
 
           if "/" not in repo:
-              sys.exit("Invalid REPOS. Use username/repository")
+              sys.exit("Invalid REPOS. Use username/repo")
 
           owner, name = repo.split("/", 1)
 
           if not owner or not name or "/" in name:
-              sys.exit("Invalid repository format.")
+              sys.exit("Invalid repository.")
 
           headers = {
               "Authorization": f"Bearer {token}",
@@ -205,17 +186,22 @@ jobs:
 
           api = "https://api.github.com"
 
-          print("Getting repository information...")
+          print("STEP 5 - SELF RESTART")
+          print("Repository:", repo)
 
-          response = requests.get(
-              f"{api}/repos/{owner}/{name}",
-              headers=headers,
-              timeout=30
-          )
+          try:
+              response = requests.get(
+                  f"{api}/repos/{owner}/{name}",
+                  headers=headers,
+                  timeout=30
+              )
 
-          response.raise_for_status()
+              response.raise_for_status()
 
-          branch = response.json()["default_branch"]
+              branch = response.json()["default_branch"]
+
+          except Exception as error:
+              sys.exit(f"Repository error: {error}")
 
           url = (
               f"{api}/repos/{owner}/{name}"
@@ -235,12 +221,14 @@ jobs:
 
                   if response.status_code == 204:
                       print("SELF RESTART SUCCESS")
+                      print("Next workflow dispatched.")
                       sys.exit(0)
 
                   print(
-                      f"Attempt {attempt}: "
-                      f"{response.status_code} "
-                      f"{response.text}"
+                      "Attempt:",
+                      attempt,
+                      response.status_code,
+                      response.text
                   )
 
               except Exception as error:
